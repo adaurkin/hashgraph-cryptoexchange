@@ -1,19 +1,19 @@
 
 /*
- * This file is public domain.
  *
- * SWIRLDS MAKES NO REPRESENTATIONS OR WARRANTIES ABOUT THE SUITABILITY OF 
- * THE SOFTWARE, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED 
- * TO THE IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
- * PARTICULAR PURPOSE, OR NON-INFRINGEMENT. SWIRLDS SHALL NOT BE LIABLE FOR 
- * ANY DAMAGES SUFFERED AS A RESULT OF USING, MODIFYING OR 
- * DISTRIBUTING THIS SOFTWARE OR ITS DERIVATIVES.
  */
 
 import java.io.IOException;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Random;
+
+import java.util.ArrayList; // for orderBook
+import java.lang.reflect.Field; // temp
+// import java.time.Instant;
+// import java.time.temporal.Temporal;
+// import java.time.temporal.ChronoUnit;
+import java.time.Duration;
 
 import com.swirlds.platform.Address;
 import com.swirlds.platform.AddressBook;
@@ -25,33 +25,40 @@ import com.swirlds.platform.SwirldState;
 import com.swirlds.platform.Utilities;
 
 /**
- * This holds the current state of a swirld representing both a cryptocurrency and a stock market.
- * 
- * This is just a simulated stock market, with fictitious stocks and ticker symbols. But the cryptocurrency
- * is actually real. At least, it is real in the sense that if enough people participate for long enough
- * (and if Swirlds has encryption turned on), then it could actually be a reliable cryptocurrency. An
- * entirely new cryptocurrency is created every time all the computers start the program over again, so
- * these cryptocurrencies won't have any actual value.
+ * This holds the current state of a swirld representing a cryptocurrency market.
+ *
+ * This is just a simulated cryptocurrency market.
  */
-public class CryptocurrencyDemoState implements SwirldState {
+public class CryptoExchangeState implements SwirldState {
 	/**
 	 * the first byte of a transaction is the ordinal of one of these four: do not delete any of these or
 	 * change the order (and add new ones only to the end)
 	 */
 	public static enum TransType {
-		slow, fast, bid, ask // run slow/fast or broadcast a bid/ask
+		slow, fast, order, cancel // run slow/fast or broadcast an order/cancellation
 	};
 
+	/** temporary counter */
+	public long transactionsProcessed = 0;
+	public long transactionsConsensusProcessed = 0;
+	/** divisor for amounts of currencies */
+	public final static long divisor = 100*1000*1000; // 10^8
 	/** in slow mode, number of milliseconds to sleep after each outgoing sync */
-	private final static int delaySlowSync = 1000;
+	private final static int delaySlowSync = 1000; // default
+	// private final static int delaySlowSync = 5000;
+	// private final static int delaySlowSync = 100;
+	// private final static int delaySlowSync = 0; // to be deployed
 	/** in fast mode, number of milliseconds to sleep after each outgoing sync */
 	private final static int delayFastSync = 0;
-	/** number of different stocks that can be bought and sold */
-	public final static int NUM_STOCKS = 10;
+	// private final static int delayFastSync = 1000;
 	/** remember the last MAX_TRADES trades that occurred. */
 	private final static int MAX_TRADES = 200;
 	/** the platform running this app */
 	private Platform platform = null;
+	/** number of different currencies that can be exchanged */
+	private int numCurrencies;
+	/** id of the instance - to avoid multiple instance output */
+	public int main_id;
 
 	////////////////////////////////////////////////////
 	// the following are the shared state:
@@ -62,10 +69,10 @@ public class CryptocurrencyDemoState implements SwirldState {
 	private int numMembers;
 	/** ticker symbols for each of the stocks */
 	private String[] tickerSymbol;
-	/** number of cents owned by each member */
-	private long[] wallet;
-	/** shares[m][s] is the number of shares that member m owns of stock s */
-	private long[][] shares;
+	/** rate in USD for each of the stocks */
+	public double[] tickerRate;
+	/** portfolio[m][s] is the amount of currencies that member m owns of stock s (multiplied by 10^8 for divisibility) */
+	private long[][] portfolio;
 	/** a record of the last NUM_TRADES trades */
 	private String[] trades;
 	/** number of trades currently stored in trades[] (from 0 to MAX_TRADES, inclusive) */
@@ -74,23 +81,16 @@ public class CryptocurrencyDemoState implements SwirldState {
 	private int lastTradeIndex = 0;
 	/** how many trades have happened in all history */
 	private long numTrades = 0;
-	/** the most recent price (in cents) that a seller has offered for each stock */
-	private byte[] ask;
-	/** the most recent price (in cents) that a buyer has offered for each stock */
-	private byte[] bid;
-	/** the ID number of the member whose offer is stored in ask[] (or -1 if none) */
-	private long[] askId;
-	/** the ID number of the member whose offer is stored in bid[] (or -1 if none) */
-	private long[] bidId;
-	/** price of the most recent trade for each stock */
-	private byte[] price;
+
+	// private ArrayList<CryptoExchangeOrder> orderBook = new ArrayList<CryptoExchangeOrder>();
+	private ArrayList<CryptoExchangeOrder> orderBooks[][];
 
 	////////////////////////////////////////////////////
 
 	/**
 	 * get the string representing the trade with the given sequence number. The first trade in all of
 	 * history is sequence 1, the next is 2, etc.
-	 * 
+	 *
 	 * @param seq
 	 *            the sequence number of the trade
 	 * @return the trade, or "" if it hasn't happened yet or happened so long ago that it is no longer
@@ -105,22 +105,10 @@ public class CryptocurrencyDemoState implements SwirldState {
 	}
 
 	/**
-	 * get the current price of each stock, copying it into the given array
-	 * 
-	 * @param price
-	 *            the array of NUM_STOCKS elements that will be filled with the prices
-	 */
-	public synchronized void getPriceCopy(byte[] price) {
-		for (int i = 0; i < NUM_STOCKS; i++) {
-			price[i] = this.price[i];
-		}
-	}
-
-	/**
 	 * return how many trades have occurred. So getTrade(getNumTrades()) will return a non-empty string (if
 	 * any trades have ever occurred), but getTrade(getNumTrades()+1) will return "" (unless one happens
 	 * between the two method calls).
-	 * 
+	 *
 	 * @return number of trades
 	 */
 	public synchronized long getNumTrades() {
@@ -134,96 +122,53 @@ public class CryptocurrencyDemoState implements SwirldState {
 
 	@Override
 	public synchronized FastCopyable copy() {
-		CryptocurrencyDemoState copy = new CryptocurrencyDemoState();
+		CryptoExchangeState copy = new CryptoExchangeState();
 		copy.copyFrom(this);
 		return copy;
 	}
 
 	@Override
 	public void copyTo(FCDataOutputStream outStream) {
-		try {
-			addressBook.copyTo(outStream);
-			outStream.writeInt(numMembers);
-			Utilities.writeStringArray(outStream, tickerSymbol);
-			Utilities.writeLongArray(outStream, wallet);
-			Utilities.writeLongArray2D(outStream, shares);
-			Utilities.writeStringArray(outStream, trades);
-			outStream.writeInt(numTradesStored);
-			outStream.writeInt(lastTradeIndex);
-			outStream.writeLong(numTrades);
-			Utilities.writeByteArray(outStream, ask);
-			Utilities.writeByteArray(outStream, bid);
-			Utilities.writeLongArray(outStream, askId);
-			Utilities.writeLongArray(outStream, bidId);
-			Utilities.writeByteArray(outStream, price);
-		} catch (IOException e) {
-			e.printStackTrace();
-		}
+		System.out.println("copyTo");
 	}
 
 	@Override
 	public void copyFrom(FCDataInputStream inStream) {
-		try {
-			addressBook.copyFrom(inStream);
-			numMembers = inStream.readInt();
-			tickerSymbol = Utilities.readStringArray(inStream);
-			wallet = Utilities.readLongArray(inStream);
-			shares = Utilities.readLongArray2D(inStream);
-			trades = Utilities.readStringArray(inStream);
-			numTradesStored = inStream.readInt();
-			lastTradeIndex = inStream.readInt();
-			numTrades = inStream.readLong();
-			ask = Utilities.readByteArray(inStream);
-			bid = Utilities.readByteArray(inStream);
-			askId = Utilities.readLongArray(inStream);
-			bidId = Utilities.readLongArray(inStream);
-			price = Utilities.readByteArray(inStream);
-		} catch (IOException e) {
-			e.printStackTrace();
-		}
+		System.out.println("copyFrom");
 	}
 
 	@Override
-	public synchronized void copyFrom(SwirldState oldCryptocurrencyState) {
-		CryptocurrencyDemoState old = (CryptocurrencyDemoState) oldCryptocurrencyState;
+	public synchronized void copyFrom(SwirldState oldCryptoExchangeState) {
+		CryptoExchangeState old = (CryptoExchangeState) oldCryptoExchangeState;
 
 		platform = old.platform;
 		addressBook = old.addressBook.copy();
 		numMembers = old.numMembers;
 		tickerSymbol = old.tickerSymbol.clone();
-		wallet = old.wallet.clone();
-		shares = Utilities.deepClone(old.shares);
+		portfolio = Utilities.deepClone(old.portfolio);
 		trades = old.trades.clone();
 		numTradesStored = old.numTradesStored;
 		lastTradeIndex = old.lastTradeIndex;
 		numTrades = old.numTrades;
-		ask = old.ask.clone();
-		bid = old.bid.clone();
-		askId = old.askId.clone();
-		bidId = old.bidId.clone();
-		price = old.price.clone();
+		tickerRate = old.tickerRate.clone();
+		main_id = old.main_id;
+		orderBooks = old.orderBooks.clone();
+		transactionsProcessed = old.transactionsProcessed; // temp
+		transactionsConsensusProcessed = old.transactionsConsensusProcessed; // temp
 	}
 
 	/**
 	 * {@inheritDoc}
-	 * 
-	 * The matching algorithm for any given stock is as follows. The first bid or ask for a stock is
-	 * remembered. Then, if there is a higher bid or lower ask, it is remembered, replacing the earlier one.
-	 * Eventually, there will be a bid that is equal to or greater than the ask. At that point, they are
-	 * matched, and a trade occurs, selling one share at the average of the bid and ask. Then the stored bid
-	 * and ask are erased, and it goes back to waiting for a bid or ask to remember.
+	 *
+	 * The matching algorithm for orders is as follows.
+	 * ...
 	 * <p>
-	 * If a member tries to sell a stock for which they own no shares, or if they try to buy a stock at a
-	 * price higher than the amount of money they currently have, then their bid/ask for that stock will not
-	 * be stored.
-	 * <p>
-	 * A transaction is 1 or 3 bytes:
-	 * 
+	 * A transaction is 1 or more bytes:
 	 * <pre>
-	 * {SLOW} = run slowly 
-	 * {FAST} = run quickly 
-	 * {BID,s,p} = bid to buy 1 share of stock s at p cents (where 0 &lt;= p &lt;= 127) 
-	 * {ASK,s,p} = ask to sell 1 share of stock s at p cents (where 1 &lt;= p &lt;= 127)
+	 * {SLOW} = run slowly
+	 * {FAST} = run quickly
+	 * {EXCHANGE,s,b,a,r} = order to exchange a (amount) of currency s (sell) into currency b (buy) with rate r
+	 * {CANCEL,s,b,a,r} = cancel existing order to exchange a (amount) of currency s (sell) into currency b (buy) with rate r
 	 * </pre>
 	 */
 	@Override
@@ -232,6 +177,9 @@ public class CryptocurrencyDemoState implements SwirldState {
 		if (transaction == null || transaction.length == 0) {
 			return;
 		}
+
+		transactionsProcessed++;
+
 		if (transaction[0] == TransType.slow.ordinal()) {
 			platform.setSleepAfterSync(delaySlowSync);
 			return;
@@ -239,91 +187,84 @@ public class CryptocurrencyDemoState implements SwirldState {
 			platform.setSleepAfterSync(delayFastSync);
 			return;
 		} else if (!isConsensus || transaction.length < 3) {
-			return;// ignore any bid/ask that doesn't have consensus yet
-		}
-		int selfId = (int) id;
-		int askBid = transaction[0];
-		int tradeStock = transaction[1];
-		int tradePrice = transaction[2];
-
-		if (tradePrice < 1 || tradePrice > 127) {
-			return; // all asks and bids must be in the range 1 to 127
+			return;// ignore any order that doesn't have consensus yet
 		}
 
-		if (askBid == TransType.ask.ordinal()) { // it is an ask
-			// if they're trying to sell something they don't have, then ignore it
-			if (shares[selfId][tradeStock] == 0) {
-				return;
-			}
-			// if previous member with bid no longer has enough money, then forget them
-			if (bidId[tradeStock] != -1
-					&& wallet[(int) bidId[tradeStock]] < bid[tradeStock]) {
-				bidId[tradeStock] = -1;
-			}
-			// if this is the lowest ask for this stock since its last trade, then remember it
-			if (askId[tradeStock] == -1 || tradePrice < ask[tradeStock]) {
-				askId[tradeStock] = selfId;
-				ask[tradeStock] = (byte) tradePrice;
-			}
-		} else { // it is a bid
-			// if they're trying to buy but don't have enough money, then ignore it
-			if (shares[selfId][tradeStock] == 0) {
-				return;
-			}
-			// if previous member with ask no longer has the share, then forget them
-			if (askId[tradeStock] != -1
-					&& shares[(int) askId[tradeStock]][tradeStock] == 0) {
-				askId[tradeStock] = -1;
-			}
-			// if this is the highest bid for this stock since its last trade, then remember it
-			if (bidId[tradeStock] == -1 || tradePrice > bid[tradeStock]) {
-				bidId[tradeStock] = selfId;
-				bid[tradeStock] = (byte) tradePrice;
-			}
-		}
-		// if there is not yet a match for this stock, then don't create a trade yet
-		if (askId[tradeStock] == -1 || bidId[tradeStock] == -1
-				|| ask[tradeStock] > bid[tradeStock]) {
+		transactionsConsensusProcessed++;
+
+		int origId = (int) id;
+		// create an object of class Order from buffer
+		CryptoExchangeOrder ord = new CryptoExchangeOrder(origId, transaction);
+		ord.timeCreated = timeCreated; // temp - remove or add to constructor
+		// output(String.format("Consensus on a transaction aged: %f sec", ord.age()/1000.)); // temp
+		byte transType= ord.type;
+		byte currSell = ord.sell;
+		byte currBuy  = ord.buy;
+		long amount   = ord.amount;
+		double rate   = ord.rate;
+
+		// CANCEL
+		// find the order in orderBook and delete it
+		if (transaction[0] == TransType.cancel.ordinal()) {
+			long count = orderBooks[currSell][currBuy].size(); // temp
+			// delete all orders of the member with the given pair, amount and rate
+			orderBooks[currSell][currBuy].removeIf(o -> o.origId == origId & o.amount == amount & o.rate == rate);
+			count -= orderBooks[currSell][currBuy].size(); // temp
+			// output(String.format("CANCEL order %s->%s. Orders deleted: %d", tickerSymbol[currSell], tickerSymbol[currBuy], count)); // temp
 			return;
 		}
 
-		// there is a match, so create the trade
+		// ORDER
+		// match the order or store it to an order book
+		if (transType == TransType.order.ordinal()) {
+			// try to match the order vs orderBook
+			// "cross" currSell & currBuy here to match orders; filter out orders of the same member
+			CryptoExchangeOrder[] ordersToMatch = orderBooks[currBuy][currSell].stream().filter(o -> o.origId != origId).toArray(CryptoExchangeOrder[]::new);
+			// CryptoExchangeOrder[] ordersToMatch = orderBooks[currBuy][currSell].stream().filter(o -> o.origId != origId & o.rate >= 1/rate).toArray(CryptoExchangeOrder[]::new);
+			// output(String.format(" ordersToMatch for %s->%s of %s: %d", tickerSymbol[currSell], tickerSymbol[currBuy], addressBook.getAddress(origId).getNickname(), ordersToMatch.length));
+			if (ordersToMatch.length > 0) {
+				// output(String.format("Matched a transaction aged: %f sec", ordersToMatch[0].age()/1000.)); // temp
+				// perform the trade (exchanging one currency for another)
+				portfolio[origId][currSell] -= amount; // latest trader gives amount of currency he sells
+				portfolio[origId][currBuy]  += ordersToMatch[0].amount; // latest trader gets the corresponding amount of currency he buys
 
-		// the trade occurs at the mean of the ask and bid
-		// if the mean is a non-integer, round to the nearest event integer
-		tradePrice = ask[tradeStock] + bid[tradeStock];
-		tradePrice = (tradePrice / 2) + ((tradePrice % 4) / 3);
+				portfolio[ordersToMatch[0].origId][currSell] += amount; // earlier trader gets amount of currency he buys (the other one sells)
+				portfolio[ordersToMatch[0].origId][currBuy]  -= ordersToMatch[0].amount; // earlier trader gives the corresponding amount of currency he sells (the other one buys)
+				// the trade occurs at the mean of the ask and bid
 
-		// perform the trade (exchanging money for a share)
-		wallet[(int) askId[tradeStock]] += tradePrice; // seller gets money
-		wallet[(int) bidId[tradeStock]] -= tradePrice; // buyer gives money
-		shares[(int) askId[tradeStock]][tradeStock] -= 1; // seller gives 1 share
-		shares[(int) bidId[tradeStock]][tradeStock] += 1; // buyer gets 1 share
+				numTrades++;
+				numTradesStored = Math.min(MAX_TRADES, 1 + numTradesStored);
+				lastTradeIndex = (lastTradeIndex + 1) % MAX_TRADES;
 
-		// save a description of the trade to show on the console
-		String selfName = addressBook.getAddress(id).getSelfName();
-		String sellerNickname = addressBook.getAddress(askId[tradeStock])
-				.getNickname();
-		String buyerNickname = addressBook.getAddress(bidId[tradeStock])
-				.getNickname();
-		int change = tradePrice - price[tradeStock];
-		double changePerc = 100. * change / price[tradeStock];
-		String dir = (change > 0) ? "^" : (change < 0) ? "v" : " ";
-		numTrades++;
-		numTradesStored = Math.min(MAX_TRADES, 1 + numTradesStored);
-		lastTradeIndex = (lastTradeIndex + 1) % MAX_TRADES;
-		String tradeDescription = String.format(
-				"%6d %6s %7.2f %s %4.2f %7.2f%% %7s->%s      %5s has $%-8.2f and shares: %s",
-				numTrades, tickerSymbol[tradeStock], tradePrice / 100., dir,
-				Math.abs(change / 100.), Math.abs(changePerc), sellerNickname,
-				buyerNickname, selfName, wallet[(int) id] / 100.,
-				Arrays.toString(shares[(int) id]));
+				// save a description of the trade to show on the console
+				String sellerNickname = addressBook.getAddress(origId).getNickname();
+				String buyerNickname = addressBook.getAddress(ordersToMatch[0].origId).getNickname();
+				String tradeDescription = String.format(
+						"Trade #%5d %f %3s -> %3s @ %f | %s: %s <-> %s: %s",
+						numTrades, (double)amount/divisor, tickerSymbol[currSell], tickerSymbol[currBuy], (double)rate,
+						sellerNickname, getPortfolio(portfolio[origId]),
+						buyerNickname,  getPortfolio(portfolio[ordersToMatch[0].origId])
+						);
+				// record the trade
+				trades[lastTradeIndex] = tradeDescription;
+				// output("Added: " + tradeDescription);
 
-		// record the trade, and say there are now no pending asks or bids
-		trades[lastTradeIndex] = tradeDescription;
-		price[tradeStock] = (byte) tradePrice;
-		askId[tradeStock] = -1;
-		bidId[tradeStock] = -1;
+				// output time from initial order creation to matching
+				// output(String.format("Time to match: %s", Duration.between(ordersToMatch[0].timeCreated, timeCreated)));
+
+				// remove matched order
+				long count = orderBooks[currBuy][currSell].size();
+				// key: ogigId + sell + buy ? delete all orders of the member with the given pair?
+				orderBooks[currBuy][currSell].removeIf(o -> o.origId == ordersToMatch[0].origId & o.amount == ordersToMatch[0].amount & o.rate == ordersToMatch[0].rate);
+				count -= orderBooks[currBuy][currSell].size();
+				// output(String.format("order matched: %s->%s. Orders deleted: %d", tickerSymbol[currSell], tickerSymbol[currBuy], count));
+			} else {
+				// if not matched, add to orderbook
+				// ToDo: count number of existing orders with lower or equal rate, then .add(ord, counter)
+				orderBooks[currSell][currBuy].add(ord);
+				// output(String.format(" orderBooks[%d][%d] length: %d", currSell, currBuy, orderBooks[currSell][currBuy].size()));
+			}
+		}
 
 		// start with fast syncing until first trade, then be slow until user hits "F"
 		if (numTrades == 1) {
@@ -340,38 +281,84 @@ public class CryptocurrencyDemoState implements SwirldState {
 		this.platform = platform;
 		this.addressBook = addressBook;
 		this.numMembers = addressBook.getSize();
-		tickerSymbol = new String[NUM_STOCKS];
-		wallet = new long[numMembers];
-		shares = new long[numMembers][NUM_STOCKS];
+
+		try {
+			Field field = platform.getClass().getDeclaredField("platformId");
+			field.setAccessible(true);
+			this.main_id = field.getInt(platform);
+		} catch (Exception e) {}
+
+		// use args to initialize tickerSymbol
+		String[] pars = platform.getParameters(); // read parameters from config.txt
+		numCurrencies = pars.length -1;
+		tickerSymbol = new String[numCurrencies];
+		tickerRate = new double[numCurrencies];
+		long[] initialBalances = new long[numCurrencies];
+
+		for (int i=0; i<numCurrencies; i++)
+		{
+			String[] parts = pars[i+1].split(":");
+			tickerSymbol[i] = parts[0];
+			tickerRate[i] = Double.parseDouble(parts[1]);
+			initialBalances[i] = Math.round(divisor * Double.parseDouble(parts[2]));
+		}
+
+		portfolio = new long[numMembers][numCurrencies];
 		trades = new String[MAX_TRADES];
 		numTradesStored = 0;
 		lastTradeIndex = 0;
 		numTrades = 0;
-		ask = new byte[NUM_STOCKS];
-		bid = new byte[NUM_STOCKS];
-		askId = new long[NUM_STOCKS];
-		bidId = new long[NUM_STOCKS];
-		price = new byte[NUM_STOCKS];
 
-		// seed 0 so everyone gets same ticker symbols on every run
-		Random rand = new Random(0);
-		for (int i = 0; i < NUM_STOCKS; i++) {
-			tickerSymbol[i] = "" // each ticker symbol is 4 random capital letters (ASCII 65 is 'A')
-					+ (char) (65 + rand.nextInt(26))
-					+ (char) (65 + rand.nextInt(26))
-					+ (char) (65 + rand.nextInt(26))
-					+ (char) (65 + rand.nextInt(26));
-			askId[i] = bidId[i] = -1; // no one has offered to buy or sell yet
-			ask[i] = bid[i] = price[i] = 64; // start the trading around 64 cents
-		}
 		for (int i = 0; i < numMembers; i++) {
-			wallet[i] = 20000; // each member starts with $200 dollars (20,000 cents)
-			shares[i] = new long[NUM_STOCKS];
-			for (int j = 0; j < NUM_STOCKS; j++) {
-				shares[i][j] = 200; // each member starts with 200 shares of each stock
+			portfolio[i] = new long[numCurrencies];
+			for (int j = 0; j < numCurrencies; j++) {
+				portfolio[i][j] = initialBalances[j]; // each member starts with predefined amount of currencies
 			}
 		}
+
+    // initialize orderBooks
+		this.orderBooks = (ArrayList<CryptoExchangeOrder>[][]) new ArrayList [numCurrencies][numCurrencies];
+		for (int i = 0; i < numCurrencies; i++) {
+			for (int j = 0; j < numCurrencies; j++) {
+				if (i != j) {
+					this.orderBooks[i][j] = new ArrayList<CryptoExchangeOrder>();
+				}
+			}
+		}
+
 		// start with fast syncing, until the first trade
 		this.platform.setSleepAfterSync(delayFastSync);
+	}
+
+	private String describeOrder(CryptoExchangeOrder ord) {
+		String sellerNickname = addressBook.getAddress(ord.origId)
+				.getNickname();
+		byte currSell = ord.sell;
+		byte currBuy  = ord.buy;
+		long amount   = ord.amount;
+		double rate   = ord.rate;
+		String orderDescription = String.format(
+				"Order of %s: %f %3s -> %3s @ %f %s",
+				sellerNickname, (double)amount/divisor, tickerSymbol[currSell], tickerSymbol[currBuy], (double)rate
+				,ord.timeCreated);
+		return orderDescription;
+	}
+
+	private String getPortfolio(long[] portfolio) {
+		String result = "";
+		for (int i=0; i<portfolio.length; i++)
+		{
+			if (result != "") {
+				result += ", ";
+			}
+			result += String.format("%1$,.2f", 1.0*portfolio[i]/divisor) + this.tickerSymbol[i];
+		}
+		return result;
+	}
+
+	private void output(String str) {
+		if (main_id==0) {
+			System.out.println(str);
+		}
 	}
 }
