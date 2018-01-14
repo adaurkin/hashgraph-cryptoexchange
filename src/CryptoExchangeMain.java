@@ -7,6 +7,13 @@ import java.awt.event.KeyEvent;
 import java.awt.event.KeyListener;
 import java.util.Random;
 
+// for stats
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import com.swirlds.platform.Statistics;
+
 // temp
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -24,6 +31,8 @@ import com.swirlds.platform.SwirldState;
  * Rates are temporarily fixed.
  */
 public class CryptoExchangeMain implements SwirldMain {
+	private final boolean verboseOutput = false;
+	private final boolean statsToFile = true;
 	/** temporary counter */
 	public long transactionsCreated = 0;
 	public Instant timeStarted; // temp
@@ -52,6 +61,8 @@ public class CryptoExchangeMain implements SwirldMain {
 	private boolean isFast = false;
 	/** number of different currencies that can be exchanged */
 	private int numCurrencies;
+	/** path and filename of the .csv file to write to */
+	private String path;
 
 	/** Listen for input from the keyboard, and remember the last key typed. */
 	private class GuiKeyListener implements KeyListener {
@@ -89,6 +100,86 @@ public class CryptoExchangeMain implements SwirldMain {
 		Browser.main(args);
 	}
 
+	/**
+	 * Write a message to the log file. Also write it to the console, if there is one. In both cases, skip a
+	 * line after writing, if newline is true. This method opens the file at the start and closes it at the
+	 * end, to deconflict with any other process trying to read the same file. For example, this app could
+	 * run headless on a server, and an FTP session could download the log file, and the file it received
+	 * would have only complete log messages, never half a message.
+	 * <p>
+	 * The file is created if it doesn't exist. It will be named "StatsDemo0.csv", with the number
+	 * incrementing for each member currently running on the local machine, if there is more than one. The
+	 * location is the "current" directory. If run from a shell script, it will be the current folder that
+	 * the shell script has. If run from Eclipse, it will be at the top of the project folder. If there is a
+	 * console, it prints the location there. If not, it can be found by searching the file system for
+	 * "StatsDemo0.csv".
+	 *
+	 * @param message
+	 *            the String to write
+	 * @param newline
+	 *            true if a new line should be started after this one
+	 */
+	private void write(String message, boolean newline) {
+		BufferedWriter file = null;
+		try {// create or append to file in current directory
+			path = System.getProperty("user.dir") + File.separator + "StatsDemo"
+					+ selfId + ".csv";
+			file = new BufferedWriter(new FileWriter(path, true));
+			if (newline) {
+				file.write("\n");
+			} else {
+				file.write(message.trim().replaceAll(",", "") + ",");
+			}
+		} catch (IOException e) {
+			e.printStackTrace();
+		} finally {
+			if (file != null) {
+				try {
+					file.close();
+				} catch (Exception e) {
+				}
+			}
+		}
+		if (console != null) {
+			console.out.print(newline ? "\n" : message);
+		}
+	}
+
+	/** Erase the existing file (if one exists) */
+	private void eraseFile() {
+		BufferedWriter file = null;
+		try {// erase file in current directory
+			path = System.getProperty("user.dir") + File.separator + "StatsDemo"
+					+ selfId + ".csv";
+			file = new BufferedWriter(new FileWriter(path, false));
+			file.write("");
+		} catch (IOException e) {
+			e.printStackTrace();
+		} finally {
+			if (file != null) {
+				try {
+					file.close();
+				} catch (Exception e) {
+				}
+			}
+		}
+	}
+
+	/**
+	 * Same as writeToConsolAndFile, except it does not start a new line after it.
+	 *
+	 * @param message
+	 *            the String to write
+	 */
+	private void write(String message) {
+		write(message, false);
+	}
+
+	/** Start the next line, for both console and file. */
+	private void newline() {
+		write("", true);
+	}
+
 	// ///////////////////////////////////////////////////////////////////
 
 	@Override
@@ -114,6 +205,21 @@ public class CryptoExchangeMain implements SwirldMain {
 
 	@Override
 	public void run() {
+		Statistics statsObj = platform.getStats();
+		String[][] stats = statsObj.getAvailableStats();
+		// the first node saves stats if needed
+		if (statsToFile & this.selfId==0) {
+			// erase the old file, if any
+			eraseFile();
+			// write the column headings
+			for (int i = 0; i < stats.length; i++) {
+				write(String.format("%" + statsObj.getStatString(i).length() + "s",
+						stats[i][0]));
+			}
+			newline();
+		}
+
+		// long seq = 1;
 		// loop forever
 		while (true) {
 			CryptoExchangeState state = (CryptoExchangeState) platform
@@ -149,7 +255,7 @@ public class CryptoExchangeMain implements SwirldMain {
 
 			// temp
 			transactionsCreated++;
-			if (this.selfId==0) {
+			if (verboseOutput & this.selfId==0) {
 				long millis = timeStarted.until(Instant.now(), ChronoUnit.MILLIS);
 
 				System.out.println(String.format("trans - Created: %d; rate: %f; ratio: %f; proc.rate: %f tr/sec; transactionsConsensus rate: %f; Trades rate: %f", transactionsCreated, 1000.*transactionsCreated/millis, 1.*state.transactionsProcessed/transactionsCreated, 1000.*state.transactionsProcessed/millis, 1.*state.transactionsConsensusProcessed/state.transactionsProcessed, 1000.*state.getNumTrades()/millis));
@@ -159,6 +265,33 @@ public class CryptoExchangeMain implements SwirldMain {
 			if (speedCmd != -1) {
 				platform.createTransaction(new byte[] { speedCmd }, null);
 				speedCmd = -1;
+			}
+/*
+			long lastSeq = state.getNumTrades();
+			for (; seq < lastSeq; seq++) {
+				String s = state.getTrade(seq);
+				if (!s.equals("")) {
+					if (console != null) {
+						console.out.println(s);
+					} else {
+						if (this.selfId==0) {
+							// System.out.println(s); // temp
+						}
+					}
+				}
+			}
+*/
+
+			// the first node saves stats if needed
+			if (statsToFile & this.selfId==0) {
+				// try {
+					// write a row of numbers
+					for (int i = 0; i < stats.length; i++) {
+						write(statsObj.getStatString(i));
+					}
+					newline();
+				// } catch (InterruptedException e) {
+				// }
 			}
 
 			try {

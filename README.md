@@ -1,5 +1,5 @@
 # Decentralized Matching Engine Testing on Hashgraph
-A basic CryptoExchange app based on a public domain demo app CryptocurrencyDemo from [Swirlds SDK 17.09.15 (Alpha Version)](http://www.swirlds.com/download/). Developed for Lykke Streams contest [Decentralized Matching Engine Testing on Hashgraph (beta)](https://streams.lykke.com/Project/ProjectDetails/decentralized-realtime-matching-engine). Find more details and some test results in the [report](https://docs.google.com/document/d/1IhU49iBtbfn8Jf8JhD2zzVjbeKGTmv5PD1wUwE1cTKY/edit).
+A basic CryptoExchange app based on public domain demo apps CryptocurrencyDemo and StatsDemo from [Swirlds SDK 17.09.15 (Alpha Version)](http://www.swirlds.com/download/). Developed for Lykke Streams contest [Decentralized Matching Engine Testing on Hashgraph (beta)](https://streams.lykke.com/Project/ProjectDetails/decentralized-realtime-matching-engine). Find more details and some test results in the [report](https://docs.google.com/document/d/1IhU49iBtbfn8Jf8JhD2zzVjbeKGTmv5PD1wUwE1cTKY/edit).
 
 ## How to run the app
 1. Compile the app:
